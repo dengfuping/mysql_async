@@ -8,7 +8,7 @@
 
 pub use url::ParseError;
 
-mod tls;
+pub mod tls;
 
 use mysql_common::{
     named_params::MixedParamsError, params::MissingNamedParameterError,
@@ -109,7 +109,7 @@ pub enum DriverError {
     #[error("Error converting from mysql row.")]
     FromRow { row: Row },
 
-    #[error("Missing named parameter `{}'.", String::from_utf8_lossy(&name))]
+    #[error("Missing named parameter `{}'.", String::from_utf8_lossy(name))]
     MissingNamedParam { name: Vec<u8> },
 
     #[error("Named and positional parameters mixed in one statement.")]
@@ -163,6 +163,9 @@ pub enum DriverError {
 
     #[error("Client asked for SSL but server does not have this capability")]
     NoClientSslFlagFromServer,
+
+    #[error("mysql_clear_password must be enabled on the client side")]
+    CleartextPluginDisabled,
 }
 
 #[derive(Debug, Error)]
@@ -240,7 +243,10 @@ impl From<mysql_common::packets::ServerError<'_>> for ServerError {
         ServerError {
             code: packet.error_code(),
             message: packet.message_str().into(),
-            state: packet.sql_state_str().into(),
+            state: packet
+                .sql_state_ref()
+                .map(|s| s.as_str().into_owned())
+                .unwrap_or_else(|| "HY000".to_owned()),
         }
     }
 }

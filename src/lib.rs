@@ -36,23 +36,19 @@
 //!     mysql_async = { version = "*", default-features = false, features = ["minimal"]}
 //!     ```
 //!
-//!     **Note:* it is possible to use another `flate2` backend by directly choosing it:
+//! *   `minimal-rust` - same as `minimal` but rust-based flate2 backend is chosen. Enables:
 //!
-//!     ```toml
-//!     [dependencies]
-//!     mysql_async = { version = "*", default-features = false }
-//!     flate2 = { version = "*", default-features = false, features = ["rust_backend"] }
-//!     ```
+//!     -    `flate2/rust_backend`
 //!
-//! *   `default` – enables the following set of crate's and dependencies' features:
+//! *   `default` – enables the following set of features:
 //!
+//!     -   `minimal`
 //!     -   `native-tls-tls`
-//!     -   `flate2/zlib"
-//!     -   `mysql_common/bigdecimal03`
-//!     -   `mysql_common/rust_decimal`
-//!     -   `mysql_common/time03`
-//!     -   `mysql_common/uuid`
-//!     -   `mysql_common/frunk`
+//!     -   `bigdecimal`
+//!     -   `rust_decimal`
+//!     -   `time`
+//!     -   `frunk`
+//!     -   `binlog`
 //!
 //! *   `default-rustls` – same as default but with `rustls-tls` instead of `native-tls-tls`.
 //!
@@ -92,6 +88,19 @@
 //!     [dependencies]
 //!     mysql_async = { version = "*", features = ["tracing"] }
 //!     ```
+//!
+//! *   `binlog` - enables binlog-related functionality. Enables:
+//!
+//!     -   `mysql_common/binlog"
+//!
+//! ### Proxied features
+//!
+//! *   `derive` – enables `mysql_common/derive` feature
+//! *   `chrono` = enables `mysql_common/chrono` feature
+//! *   `time` = enables `mysql_common/time` feature
+//! *   `bigdecimal` = enables `mysql_common/bigdecimal` feature
+//! *   `rust_decimal` = enables `mysql_common/rust_decimal` feature
+//! *   `frunk` = enables `mysql_common/frunk` feature
 //!
 //! [myslqcommonfeatures]: https://github.com/blackbeam/rust_mysql_common#crate-features
 //!
@@ -191,7 +200,7 @@
 //! * [`Pool`] is a smart pointer – each clone will point to the same pool instance.
 //! * [`Pool`] is `Send + Sync + 'static` – feel free to pass it around.
 //! * use [`Pool::disconnect`] to gracefuly close the pool.
-//! * [`Pool::new`] is lazy and won't assert server availability.
+//! * ⚠️ [`Pool::new`] is lazy and won't assert server availability.
 //!
 //! # Transaction
 //!
@@ -418,6 +427,9 @@
 #[cfg(feature = "nightly")]
 extern crate test;
 
+#[cfg(feature = "derive")]
+extern crate mysql_common;
+
 pub use mysql_common::{constants as consts, params};
 
 use std::sync::Arc;
@@ -441,14 +453,25 @@ mod queryable;
 
 type BoxFuture<'a, T> = futures_core::future::BoxFuture<'a, Result<T>>;
 
-static BUFFER_POOL: once_cell::sync::Lazy<Arc<crate::buffer_pool::BufferPool>> =
-    once_cell::sync::Lazy::new(|| Default::default());
+fn buffer_pool() -> &'static Arc<crate::buffer_pool::BufferPool> {
+    static BUFFER_POOL: std::sync::OnceLock<Arc<crate::buffer_pool::BufferPool>> =
+        std::sync::OnceLock::new();
+    BUFFER_POOL.get_or_init(Default::default)
+}
+
+#[cfg(feature = "binlog")]
+#[doc(inline)]
+pub use self::conn::binlog_stream::{request::BinlogStreamRequest, BinlogStream};
 
 #[doc(inline)]
-pub use self::conn::{binlog_stream::BinlogStream, Conn};
+pub use self::conn::Conn;
 
 #[doc(inline)]
 pub use self::conn::pool::Pool;
+
+#[cfg(any(feature = "native-tls-tls", feature = "rustls-tls"))]
+#[doc(inline)]
+pub use self::error::tls::TlsError;
 
 #[doc(inline)]
 pub use self::error::{
@@ -462,13 +485,14 @@ pub use self::query::QueryWithParams;
 pub use self::queryable::transaction::IsolationLevel;
 
 #[doc(inline)]
-#[cfg(any(feature = "rustls", feature = "native-tls"))]
+#[cfg(any(feature = "rustls", feature = "native-tls-tls"))]
 pub use self::opts::ClientIdentity;
 
 #[doc(inline)]
 pub use self::opts::{
-    Opts, OptsBuilder, PoolConstraints, PoolOpts, SslOpts, DEFAULT_INACTIVE_CONNECTION_TTL,
-    DEFAULT_POOL_CONSTRAINTS, DEFAULT_STMT_CACHE_SIZE, DEFAULT_TTL_CHECK_INTERVAL,
+    ChangeUserOpts, Opts, OptsBuilder, PoolConstraints, PoolOpts, SslOpts,
+    DEFAULT_INACTIVE_CONNECTION_TTL, DEFAULT_POOL_CONSTRAINTS, DEFAULT_STMT_CACHE_SIZE,
+    DEFAULT_TTL_CHECK_INTERVAL,
 };
 
 #[doc(inline)]
@@ -476,14 +500,14 @@ pub use self::local_infile_handler::{builtin::WhiteListFsHandler, InfileData};
 
 #[doc(inline)]
 pub use mysql_common::packets::{
-    binlog_request::BinlogRequest,
     session_state_change::{
         Gtids, Schema, SessionStateChange, SystemVariable, TransactionCharacteristics,
         TransactionState, Unsupported,
     },
-    BinlogDumpFlags, Column, Interval, OkPacket, SessionStateInfo, Sid,
+    Column, GnoInterval, OkPacket, SessionStateInfo, Sid,
 };
 
+#[cfg(feature = "binlog")]
 pub mod binlog {
     #[doc(inline)]
     pub use mysql_common::binlog::consts::*;
@@ -541,9 +565,9 @@ pub mod prelude {
     #[doc(inline)]
     pub use crate::queryable::Queryable;
     #[doc(inline)]
-    pub use mysql_common::row::convert::FromRow;
+    pub use mysql_common::prelude::FromRow;
     #[doc(inline)]
-    pub use mysql_common::value::convert::{ConvIr, FromValue, ToValue};
+    pub use mysql_common::prelude::{FromValue, ToValue};
 
     /// Everything that is a statement.
     ///
@@ -572,7 +596,7 @@ pub mod prelude {
     pub trait ToConnection<'a, 't: 'a>: crate::connection_like::ToConnection<'a, 't> {}
     // explicitly implemented because of rusdoc
     impl<'a> ToConnection<'a, 'static> for &'a crate::Pool {}
-    impl<'a> ToConnection<'static, 'static> for crate::Pool {}
+    impl ToConnection<'static, 'static> for crate::Pool {}
     impl ToConnection<'static, 'static> for crate::Conn {}
     impl<'a> ToConnection<'a, 'static> for &'a mut crate::Conn {}
     impl<'a, 't> ToConnection<'a, 't> for &'a mut crate::Transaction<'t> {}
@@ -587,39 +611,29 @@ pub mod prelude {
 
 #[doc(hidden)]
 pub mod test_misc {
-    use lazy_static::lazy_static;
-
     use std::env;
+    use std::sync::OnceLock;
 
     use crate::opts::{Opts, OptsBuilder, SslOpts};
 
     #[allow(dead_code)]
     #[allow(unreachable_code)]
-    fn error_should_implement_send_and_sync() {
+    fn error_should_implement_send_and_sync(err: crate::Error) {
         fn _dummy<T: Send + Sync + Unpin>(_: T) {}
-        _dummy(panic!());
-    }
-
-    lazy_static! {
-        pub static ref DATABASE_URL: String = {
-            if let Ok(url) = env::var("DATABASE_URL") {
-                let opts = Opts::from_url(&url).expect("DATABASE_URL invalid");
-                if opts
-                    .db_name()
-                    .expect("a database name is required")
-                    .is_empty()
-                {
-                    panic!("database name is empty");
-                }
-                url
-            } else {
-                "mysql://root:password@localhost:3307/mysql".into()
-            }
-        };
+        _dummy(err);
     }
 
     pub fn get_opts() -> OptsBuilder {
-        let mut builder = OptsBuilder::from_opts(Opts::from_url(&**DATABASE_URL).unwrap());
+        static DATABASE_OPTS: OnceLock<Opts> = OnceLock::new();
+        let database_opts = DATABASE_OPTS.get_or_init(|| {
+            if let Ok(url) = env::var("DATABASE_URL") {
+                Opts::from_url(&url).expect("DATABASE_URL invalid")
+            } else {
+                Opts::from_url("mysql://root:password@localhost:3307/mysql").unwrap()
+            }
+        });
+
+        let mut builder = OptsBuilder::from_opts(database_opts.clone());
         if test_ssl() {
             let ssl_opts = SslOpts::default()
                 .with_danger_skip_domain_validation(true)
